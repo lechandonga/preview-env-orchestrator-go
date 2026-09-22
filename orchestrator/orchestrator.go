@@ -122,6 +122,8 @@ type Orchestrator struct {
 	mu    sync.Mutex
 	envs  map[string]*envState
 	slots chan struct{} // 环境数上限信号量
+
+	cleanupHook func(envName string) error // 测试钩子：注入清理失败
 }
 
 func New(cfg Config, sec *secrets.Store) *Orchestrator {
@@ -573,6 +575,11 @@ func (o *Orchestrator) teardown(st *envState) error {
 	for _, name := range names {
 		o.stopServiceLocked(st, name)
 	}
+	if o.cleanupHook != nil {
+		if err := o.cleanupHook(st.env.Name); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if st.sb != nil {
 		if err := st.sb.Cleanup(); err != nil {
 			errs = append(errs, err)
@@ -665,8 +672,9 @@ func (o *Orchestrator) Reconcile(name string) error {
 	for i := range st.spec.Services {
 		svcByName[st.spec.Services[i].Name] = &st.spec.Services[i]
 	}
+	restarted := map[string]bool{}
 	for _, d := range drift {
-		parts := strings.SplitN(d, ":", 2)
+		parts := strings.SplitN(d, ":", 3)
 		svcName := parts[1]
 		rt := st.svcs[svcName]
 		svc := svcByName[svcName]
@@ -689,8 +697,12 @@ func (o *Orchestrator) Reconcile(name string) error {
 				return fmt.Errorf("%w: restart %s: %v", ErrNotConvergent, svcName, err)
 			}
 			st.env.Services[svcName].Running = true
+			restarted[svcName] = true
 			o.ledger.Append(Event{Kind: "reconcile-fix", Env: name, Service: svcName, Detail: "restarted"})
 		case "port-lost":
+			if restarted[svcName] {
+				continue // 重启已重新分配全部端口
+			}
 			pn := parts[2]
 			delete(rt.ports, pn)
 			preferred := 0
@@ -765,4 +777,23 @@ func cloneEnv(e *Environment) *Environment {
 		c.Services[n] = &sc
 	}
 	return &c
+}
+
+// SecretBindings 返回某服务的环境变量名 -> 绑定密钥版本（不含密钥值）。
+func (o *Orchestrator) SecretBindings(envName, svcName string) (map[string]int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	st, ok := o.envs[envName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, envName)
+	}
+	rt, ok := st.svcs[svcName]
+	if !ok {
+		return nil, fmt.Errorf("%w: service %s", ErrNotFound, svcName)
+	}
+	out := map[string]int{}
+	for env, b := range rt.secrets {
+		out[env] = b.version
+	}
+	return out, nil
 }
