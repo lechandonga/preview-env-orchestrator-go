@@ -55,8 +55,8 @@ type Environment struct {
 
 // Config 是可配置上限与策略。
 type Config struct {
-	MaxEnvs      int           // 单机同时存在的环境数上限
-	PortMin      int           // 可用端口范围
+	MaxEnvs      int // 单机同时存在的环境数上限
+	PortMin      int // 可用端口范围
 	PortMax      int
 	MaxService   int           // 单环境服务数配额
 	WorkDir      string        // 沙箱根目录

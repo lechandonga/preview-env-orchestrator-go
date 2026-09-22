@@ -59,7 +59,7 @@ func (p *Process) Stop() error {
 type Sandbox struct {
 	Root string
 
-	mu   sync.Mutex
+	mu    sync.Mutex
 	procs []*Process
 }
 
