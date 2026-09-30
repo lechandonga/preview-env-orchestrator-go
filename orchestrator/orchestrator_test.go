@@ -25,7 +25,10 @@ func newTestOrch(t *testing.T, mutate func(*Config)) (*Orchestrator, *secrets.St
 		mutate(&cfg)
 	}
 	sec := secrets.NewStore()
-	o := New(cfg, sec)
+	o, err := New(cfg, sec)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(o.Close)
 	return o, sec
 }

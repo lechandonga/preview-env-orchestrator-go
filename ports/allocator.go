@@ -79,6 +79,18 @@ func (a *Allocator) Owner(port int) (string, bool) {
 	return o, ok
 }
 
+// Restore 在重建分配器状态时恢复一条已知占用（重启/接管时从落盘记录加载）。
+// 端口已被其他 owner 占用时返回 false 且不覆盖（正常不应发生，属于状态损坏）。
+func (a *Allocator) Restore(owner string, port int) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if o, taken := a.used[port]; taken && o != owner {
+		return false
+	}
+	a.used[port] = owner
+	return true
+}
+
 // InUse 返回当前占用数。
 func (a *Allocator) InUse() int {
 	a.mu.Lock()

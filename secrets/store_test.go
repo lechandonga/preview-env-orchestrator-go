@@ -50,3 +50,31 @@ func TestConcurrentAccess(t *testing.T) {
 		t.Fatalf("latest=%d, want 33", latest)
 	}
 }
+
+func TestRevoke(t *testing.T) {
+	s := NewStore()
+	s.Put("k", "a")
+	if v, _ := s.Rotate("k", "b"); v != 2 {
+		t.Fatalf("v2=%d", v)
+	}
+	if err := s.Revoke("k", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get("k", 1); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("吊销版本必须 ErrRevoked, got %v", err)
+	}
+	if got, err := s.Get("k", 2); err != nil || got != "b" {
+		t.Fatalf("未吊销版本应可读, got %q err=%v", got, err)
+	}
+	// 全量吊销后最新版本也不可读，绝不退化。
+	if err := s.Revoke("k", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get("k", 0); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("全量吊销后最新版本也必须失败, got %v", err)
+	}
+	if err := s.Revoke("ghost", 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("吊销缺失密钥应 ErrNotFound, got %v", err)
+	}
+	t.Log("判定依据: 单版本/全量吊销后 Get 明确 ErrRevoked，未吊销版本不受影响")
+}
