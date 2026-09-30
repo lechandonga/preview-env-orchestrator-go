@@ -2,7 +2,10 @@
 package ports
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 )
@@ -21,6 +24,73 @@ type Allocator struct {
 
 func New(min, max int) *Allocator {
 	return &Allocator{min: min, max: max, used: map[int]string{}}
+}
+
+// Snapshot 返回当前持有者映射的拷贝（持久化用）。
+func (a *Allocator) Snapshot() map[int]string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make(map[int]string, len(a.used))
+	for p, o := range a.used {
+		out[p] = o
+	}
+	return out
+}
+
+// Restore 用持有者映射重建内存状态（重启/跨实例加载用）。
+func (a *Allocator) Restore(used map[int]string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.used = map[int]string{}
+	for p, o := range used {
+		if p < a.min || p > a.max {
+			continue
+		}
+		a.used[p] = o
+	}
+}
+
+// Save 把当前分配原子写入 path（调用方必须已持有跨进程锁）。
+func (a *Allocator) Save(path string) error {
+	data, err := json.Marshal(a.Snapshot())
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// Load 从 path 恢复分配；文件不存在视为空状态。
+func (a *Allocator) Load(path string) error {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var used map[int]string
+	if err := json.Unmarshal(data, &used); err != nil {
+		return err
+	}
+	a.Restore(used)
+	return nil
+}
+
+// EnsureFile 在文件不存在时写入初始空状态（首次初始化用）。
+func (a *Allocator) EnsureFile(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return a.Save(path)
 }
 
 // Allocate 为 owner 分配端口。
@@ -46,12 +116,15 @@ func (a *Allocator) Allocate(owner string, preferred int) (int, error) {
 }
 
 // Release 释放单个端口；只有持有者能释放，幂等。
-func (a *Allocator) Release(owner string, port int) {
+// 返回 true 表示本次调用真正释放了端口（用于保证跨重启只释放一次）。
+func (a *Allocator) Release(owner string, port int) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.used[port] == owner {
 		delete(a.used, port)
+		return true
 	}
+	return false
 }
 
 // ReleaseAll 释放 owner 的全部端口，返回释放列表（用于对账与日志）。

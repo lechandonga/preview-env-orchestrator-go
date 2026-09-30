@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Process 表示沙箱内运行的一个服务进程。
 type Process struct {
 	Name string
 	cmd  *exec.Cmd
+	pid  int // 接管（reattach）的进程没有 cmd，用 pid + 轮询观察
 
 	mu      sync.Mutex
 	done    chan struct{}
@@ -23,9 +25,16 @@ type Process struct {
 // PID 返回进程号，未启动返回 -1。
 func (p *Process) PID() int {
 	if p.cmd == nil || p.cmd.Process == nil {
-		return -1
+		return p.pid
 	}
 	return p.cmd.Process.Pid
+}
+
+func (p *Process) osProcess() *os.Process {
+	if p.cmd == nil || p.cmd.Process == nil {
+		return nil
+	}
+	return p.cmd.Process
 }
 
 // Alive 报告进程是否仍在运行。
@@ -47,12 +56,41 @@ func (p *Process) Stop() error {
 	}
 	p.stopped = true
 	p.mu.Unlock()
-	if p.cmd.Process != nil {
+	if proc := p.osProcess(); proc != nil {
 		// 杀整个进程组，避免残留子进程。
-		syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+		if err := syscall.Kill(-proc.Pid, syscall.SIGKILL); err != nil {
+			// 进程组可能已不存在；尝试直接杀进程本身。
+			syscall.Kill(proc.Pid, syscall.SIGKILL)
+		}
+	} else if p.pid > 0 {
+		syscall.Kill(-p.pid, syscall.SIGKILL)
 	}
 	<-p.done
 	return nil
+}
+
+// Attach 接管一个仍在运行的外部进程（引擎重启后用）。
+// 通过定期 kill(pid, 0) 观察存活；接管不持有 wait 句柄，因此只能观察、不能收割，
+// Stop 时通过进程组 SIGKILL 终止。
+func Attach(name string, pid int) (*Process, error) {
+	if pid <= 0 {
+		return nil, fmt.Errorf("attach %s: invalid pid %d", name, pid)
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		return nil, fmt.Errorf("attach %s pid %d: %w", name, pid, err)
+	}
+	p := &Process{Name: name, pid: pid, done: make(chan struct{})}
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			if syscall.Kill(pid, 0) != nil {
+				close(p.done)
+				return
+			}
+		}
+	}()
+	return p, nil
 }
 
 // Sandbox 是一个环境实例的本地隔离单元（独立工作目录 + 进程组）。
@@ -118,4 +156,15 @@ func (s *Sandbox) Cleanup() error {
 		p.Stop()
 	}
 	return os.RemoveAll(s.Root)
+}
+
+// Attach 在已有沙箱目录上重建句柄（重启后接管用）。
+func AttachRoot(root string) *Sandbox {
+	return &Sandbox{Root: root}
+}
+
+// Exists 报告沙箱目录是否仍然存在。
+func (s *Sandbox) Exists() bool {
+	_, err := os.Stat(s.Root)
+	return err == nil
 }
